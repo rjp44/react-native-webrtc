@@ -14,6 +14,7 @@ package com.oney.WebRTCModule;
 
 import android.content.Context;
 import android.content.res.Resources.NotFoundException;
+import android.graphics.Matrix;
 import android.graphics.Point;
 import android.opengl.GLES20;
 import android.os.Handler;
@@ -32,6 +33,7 @@ import org.webrtc.GlUtil;
 import org.webrtc.Logging;
 import org.webrtc.RendererCommon;
 import org.webrtc.ThreadUtils;
+import org.webrtc.VideoFrameDrawer;
 import org.webrtc.VideoRenderer;
 
 /**
@@ -57,10 +59,8 @@ public class SurfaceViewRenderer extends SurfaceView
   // EGL and GL resources for drawing YUV/OES textures. After initilization, these are only accessed
   // from the render thread.
   private EglBase eglBase;
-  private final RendererCommon.YuvUploader yuvUploader = new RendererCommon.YuvUploader();
+  private final VideoFrameDrawer frameDrawer = new VideoFrameDrawer();
   private RendererCommon.GlDrawer drawer;
-  // Texture ids for YUV frames. Allocated on first arrival of a YUV frame.
-  private int[] yuvTextures = null;
 
   // Pending frame to render. Serves as a queue with size 1. Synchronized on |frameLock|.
   private final Object frameLock = new Object();
@@ -226,12 +226,11 @@ public class SurfaceViewRenderer extends SurfaceView
       // Activity.onDestroy().
       renderThreadHandler.postAtFrontOfQueue(new Runnable() {
         @Override public void run() {
-          drawer.release();
-          drawer = null;
-          if (yuvTextures != null) {
-            GLES20.glDeleteTextures(3, yuvTextures, 0);
-            yuvTextures = null;
+          if (drawer != null) {
+            drawer.release();
+            drawer = null;
           }
+          frameDrawer.release();
           // Clear last rendered image to black.
           makeBlack();
           eglBase.release();
@@ -505,34 +504,20 @@ public class SurfaceViewRenderer extends SurfaceView
     }
 
     final long startTimeNs = System.nanoTime();
-    final float[] texMatrix;
+    final float[] layoutMatrix;
     synchronized (layoutLock) {
-      final float[] rotatedSamplingMatrix =
-          RendererCommon.rotateTextureMatrix(frame.samplingMatrix, frame.rotationDegree);
-      final float[] layoutMatrix = RendererCommon.getLayoutMatrix(
+      layoutMatrix = RendererCommon.getLayoutMatrix(
           mirror, frameAspectRatio(), (float) layoutSize.x / layoutSize.y);
-      texMatrix = RendererCommon.multiplyMatrices(rotatedSamplingMatrix, layoutMatrix);
     }
+
+    Matrix drawMatrix = RendererCommon.convertMatrixToAndroidGraphicsMatrix(layoutMatrix);
 
     // TODO(magjed): glClear() shouldn't be necessary since every pixel is covered anyway, but it's
     // a workaround for bug 5147. Performance will be slightly worse.
     GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
-    if (frame.yuvFrame) {
-      // Make sure YUV textures are allocated.
-      if (yuvTextures == null) {
-        yuvTextures = new int[3];
-        for (int i = 0; i < 3; i++)  {
-          yuvTextures[i] = GlUtil.generateTexture(GLES20.GL_TEXTURE_2D);
-        }
-      }
-      yuvUploader.uploadYuvData(
-          yuvTextures, frame.width, frame.height, frame.yuvStrides, frame.yuvPlanes);
-      drawer.drawYuv(yuvTextures, texMatrix, frame.rotatedWidth(), frame.rotatedHeight(),
-          0, 0, surfaceSize.x, surfaceSize.y);
-    } else {
-      drawer.drawOes(frame.textureId, texMatrix, frame.rotatedWidth(), frame.rotatedHeight(),
-          0, 0, surfaceSize.x, surfaceSize.y);
-    }
+    frameDrawer.drawFrame(
+        frame.toVideoFrame(), drawer, drawMatrix, 0 /* viewportX */, 0 /* viewportY */,
+        surfaceSize.x, surfaceSize.y);
 
     eglBase.swapBuffers();
     VideoRenderer.renderFrameDone(frame);
