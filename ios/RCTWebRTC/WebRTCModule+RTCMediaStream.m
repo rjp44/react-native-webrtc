@@ -38,18 +38,6 @@ typedef void (^NavigatorUserMediaErrorCallback)(NSString *errorType, NSString *e
  */
 typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream *mediaStream);
 
-- (RTCMediaConstraints *)defaultMediaStreamConstraints {
-  NSDictionary *mandatoryConstraints
-      = @{ kRTCMediaConstraintsMinWidth     : @"1280",
-           kRTCMediaConstraintsMinHeight    : @"720",
-           kRTCMediaConstraintsMinFrameRate : @"30" };
-  RTCMediaConstraints* constraints =
-  [[RTCMediaConstraints alloc]
-   initWithMandatoryConstraints:mandatoryConstraints
-   optionalConstraints:nil];
-  return constraints;
-}
-
 /**
  * Initializes a new {@link RTCAudioTrack} which satisfies specific constraints,
  * adds it to a specific {@link RTCMediaStream}, and reports success to a
@@ -82,8 +70,8 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream *mediaStream);
 
 // TODO: Use RCTConvert for constraints ...
 RCT_EXPORT_METHOD(getUserMedia:(NSDictionary *)constraints
-               successCallback:(RCTResponseSenderBlock)successCallback
-                 errorCallback:(RCTResponseSenderBlock)errorCallback) {
+               resolver:(RCTPromiseResolveBlock)resolve
+                 rejecter:(RCTPromiseRejectBlock)reject) {
   // Initialize RTCMediaStream with a unique label in order to allow multiple
   // RTCMediaStream instances initialized by multiple getUserMedia calls to be
   // added to 1 RTCPeerConnection instance. As suggested by
@@ -116,10 +104,10 @@ RCT_EXPORT_METHOD(getUserMedia:(NSDictionary *)constraints
         }
       }
       self.localStreams[mediaStreamId] = mediaStream;
-      successCallback(@[ mediaStreamId, tracks ]);
+      resolve(@[ mediaStreamId, tracks ]);
     }
     errorCallback:^ (NSString *errorType, NSString *errorMessage) {
-      errorCallback(@[ errorType, errorMessage ]);
+      reject(errorType, errorMessage, nil);
     }
     mediaStream:mediaStream];
 }
@@ -153,7 +141,7 @@ RCT_EXPORT_METHOD(getUserMedia:(NSDictionary *)constraints
          mediaStream:(RTCMediaStream *)mediaStream {
   // If mediaStream contains no audioTracks and the constraints request such a
   // track, then run an iteration of the getUserMedia() algorithm to obtain
-  // local audio content. 
+  // local audio content.
   if (mediaStream.audioTracks.count == 0) {
     // constraints.audio
     id audioConstraints = constraints[@"audio"];
@@ -268,8 +256,10 @@ RCT_EXPORT_METHOD(getUserMedia:(NSDictionary *)constraints
   }
 
   if (videoDevice) {
-    // TODO: Actually use constraints...
-    RTCAVFoundationVideoSource *videoSource = [self.peerConnectionFactory avFoundationVideoSourceWithConstraints:[self defaultMediaStreamConstraints]];
+    // we handle all the constraints parsing in js side. just consume it.
+    // TODO: support optional constraints
+    RTCMediaConstraints* finalConstraints = [[RTCMediaConstraints alloc] initWithMandatoryConstraints:videoConstraints[@"mandatory"] optionalConstraints:nil];
+    RTCAVFoundationVideoSource *videoSource = [self.peerConnectionFactory avFoundationVideoSourceWithConstraints:finalConstraints];
     // FIXME The effort above to find a videoDevice value which satisfies the
     // specified constraints was pretty much wasted. Salvage facingMode for
     // starters because it is kind of a common and hence important feature on
@@ -311,7 +301,8 @@ RCT_EXPORT_METHOD(mediaStreamRelease:(nonnull NSString *)streamID)
   }
 }
 
-RCT_EXPORT_METHOD(mediaStreamTrackGetSources:(RCTResponseSenderBlock)callback) {
+RCT_EXPORT_METHOD(mediaStreamTrackGetSources:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject) {
   NSMutableArray *sources = [NSMutableArray array];
   NSArray *videoDevices = [AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo];
   for (AVCaptureDevice *device in videoDevices) {
@@ -331,7 +322,7 @@ RCT_EXPORT_METHOD(mediaStreamTrackGetSources:(RCTResponseSenderBlock)callback) {
                          @"kind": @"audio",
                          }];
   }
-  callback(@[sources]);
+  resolve(@[sources]);
 }
 
 RCT_EXPORT_METHOD(mediaStreamTrackRelease:(nonnull NSString *)streamID : (nonnull NSString *)trackID)

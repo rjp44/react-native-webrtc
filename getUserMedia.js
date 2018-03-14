@@ -1,23 +1,63 @@
 'use strict';
 
-import {NativeModules} from 'react-native';
+import {Platform, NativeModules} from 'react-native';
+import * as RTCUtil from './RTCUtil';
 
 import MediaStream from './MediaStream';
 import MediaStreamError from './MediaStreamError';
 import MediaStreamTrack from './MediaStreamTrack';
+import withLegacyCallbacks from './withLegacyCallbacks';
 
 const {WebRTCModule} = NativeModules;
 
-export default function getUserMedia(
-    constraints,
-    successCallback,
-    errorCallback) {
-  if (typeof successCallback !== 'function') {
-    throw new TypeError('successCallback is non-nullable and required');
+// native side consume string eventually
+const DEFAULT_VIDEO_CONSTRAINTS = {
+  mandatory: {
+    minWidth: '1280',
+    minHeight: '720',
+    minFrameRate: '30',
+  },
+  facingMode: "environment",
+  optional: [],
+};
+
+function getDefaultMediaConstraints(mediaType) {
+  return (mediaType === 'audio'
+      ? true // no audio default constraint currently
+      : RTCUtil.mergeMediaConstraints(DEFAULT_VIDEO_CONSTRAINTS));
+}
+
+// this will make sure we have the correct constraint structure
+// TODO: support width/height range and the latest param names according to spec
+//   media constraints param name should follow spec. then we need a function to convert these `js names`
+//   into the real `const name that native defined` on both iOS and Android.
+// see mediaTrackConstraints: https://www.w3.org/TR/mediacapture-streams/#dom-mediatrackconstraints
+function parseMediaConstraints(customConstraints, mediaType) {
+  return (mediaType === 'audio'
+      ? RTCUtil.mergeMediaConstraints(customConstraints, {}) // no audio default constraint currently
+      : RTCUtil.mergeMediaConstraints(customConstraints, DEFAULT_VIDEO_CONSTRAINTS));
+}
+
+// this will make sure we have the correct value type
+function normalizeMediaConstraints(constraints, mediaType) {
+  if (mediaType === 'audio') {
+    ; // to be added
+  } else {
+    // NOTE: android only support minXXX currently
+    for (const param of ['minWidth', 'minHeight', 'minFrameRate', 'maxWidth', 'maxHeight', 'maxFrameRate', ]) {
+      if (constraints.mandatory.hasOwnProperty(param)) {
+        // convert to correct type here so that native can consume directly without worries.
+        constraints.mandatory[param] = (Platform.OS === 'ios'
+            ? constraints.mandatory[param].toString() // ios consumes string
+            : parseInt(constraints.mandatory[param])); // android eats integer
+      }
+    }
   }
-  if (typeof errorCallback !== 'function') {
-    throw new TypeError('errorCallback is non-nullable and required');
-  }
+
+  return constraints;
+}
+
+export default withLegacyCallbacks(constraints => {
   // According to
   // https://www.w3.org/TR/mediacapture-streams/#dom-mediadevices-getusermedia,
   // the constraints argument is a dictionary of type MediaStreamConstraints.
@@ -34,15 +74,21 @@ export default function getUserMedia(
       const typeofMediaTypeConstraints = typeof mediaTypeConstraints;
       if (typeofMediaTypeConstraints !== 'undefined') {
         if (typeofMediaTypeConstraints === 'boolean') {
-          mediaTypeConstraints && ++requestedMediaTypes;
+          if (mediaTypeConstraints) {
+            ++requestedMediaTypes;
+            constraints[mediaType] = getDefaultMediaConstraints(mediaType);
+          }
         } else if (typeofMediaTypeConstraints == 'object') {
+          // Note: object constraints for audio is not implemented in native side
           ++requestedMediaTypes;
+          constraints[mediaType] = parseMediaConstraints(constraints[mediaType], mediaType);
         } else {
-          errorCallback(
-            new TypeError(
-              'constraints.' + mediaType
-                + ' is neither a boolean nor a dictionary'));
-          return;
+          throw new TypeError('constraints.' + mediaType + ' is neither a boolean nor a dictionary');
+        }
+
+        // final check constraints and convert value to native accepted type
+        if (typeof constraints[mediaType] === 'object') {
+          constraints[mediaType] = normalizeMediaConstraints(constraints[mediaType], mediaType);
         }
       }
     }
@@ -50,27 +96,23 @@ export default function getUserMedia(
     // requestedMediaTypes is the empty set, the method invocation fails with
     // a TypeError.
     if (requestedMediaTypes === 0) {
-      errorCallback(new TypeError('constraints requests no media types'));
-      return;
+      throw new TypeError('constraints requests no media types');
     }
   } else {
-    errorCallback(new TypeError('constraints is not a dictionary'));
-    return;
+    throw new TypeError('constraints is not a dictionary');
   }
 
-  WebRTCModule.getUserMedia(
-    constraints,
-    /* successCallback */ (id, tracks) => {
+  return WebRTCModule.getUserMedia(constraints)
+    .then(([id, tracks]) => {
       const stream = new MediaStream(id);
       for (const track of tracks) {
         stream.addTrack(new MediaStreamTrack(track));
       }
-
-      successCallback(stream);
-    },
-    /* errorCallback */ (type, message) => {
+      return stream;
+    })
+    .catch(({ message, code }) => {
       let error;
-      switch (type) {
+      switch (code) {
       case 'DOMException':
         // According to
         // https://www.w3.org/TR/mediacapture-streams/#idl-def-MediaStreamError,
@@ -93,9 +135,9 @@ export default function getUserMedia(
         break;
       }
       if (!error) {
-        error = new MediaStreamError({ message, name: type });
+        error = new MediaStreamError({ message, name: code });
       }
 
-      errorCallback(error);
+      throw error;
     });
-}
+});
